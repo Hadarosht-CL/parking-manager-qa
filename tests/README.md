@@ -48,14 +48,7 @@ pytest tests/ --headed -v
 
 ## Test Report
 
-> **Additional feature:** JUnit XML reporting was not required by the assignment.
-> It was added because a test that runs but leaves no structured record of its outcome
-> has limited value in a real automation workflow. From an automation perspective,
-> the report is what makes a test suite actionable - it answers "did anything break
-> since last time?" without requiring someone to watch the terminal. JUnit XML is the
-> industry-standard format for this: it integrates with CI pipelines, artifact stores,
-> and dashboards out of the box, turning a one-off script into a traceable, repeatable
-> process.
+> **Additional feature:** Added beyond the project requirements. A test suite without structured output has limited value in a real workflow - JUnit XML makes results traceable and CI-ready with no extra dependencies.
 
 pytest has built-in JUnit XML report generation - no extra tools or installs needed.
 
