@@ -8,8 +8,8 @@ Why this scenario was chosen for automation:
   Automating it catches regressions on the happy path immediately.
 """
 
-import pytest
 from playwright.sync_api import Page, expect
+from conftest import start_parking, end_parking_session, ALERT_INFO, SESSION_ROW
 
 
 def test_full_parking_lifecycle(logged_in_page: Page, unique_plate: str, base_url: str):
@@ -17,14 +17,7 @@ def test_full_parking_lifecycle(logged_in_page: Page, unique_plate: str, base_ur
     slot = "T1"
 
     # Step 1 - Start parking session
-    page.goto(f"{base_url}/")
-    page.fill("#car_plate", unique_plate)
-    page.fill("#slot", slot)
-    page.locator("input#submit").click()
-
-    expect(page.locator(".alert-success")).to_contain_text(
-        f"Parking started for {unique_plate}"
-    )
+    start_parking(page, base_url, unique_plate, slot)
 
     # Step 2 - Verify active session appears in the dashboard table
     dashboard_table = page.locator("table tbody")
@@ -32,15 +25,12 @@ def test_full_parking_lifecycle(logged_in_page: Page, unique_plate: str, base_ur
     expect(dashboard_table.locator(f"tr:has-text('{slot}')")).to_be_visible()
 
     # Step 3 - End the parking session
-    row = page.locator("table tbody tr", has_text=unique_plate)
-    # "סיים" is Hebrew for "End" - the button label as rendered by the template
-    row.locator("button.btn-danger").click()
-
-    expect(page.locator(".alert-info")).to_contain_text(unique_plate)
+    end_parking_session(page, base_url, unique_plate)
+    expect(page.locator(ALERT_INFO)).to_contain_text(unique_plate)
 
     # Step 4 - Verify session appears in history with a calculated fee
     page.goto(f"{base_url}/history")
-    history_row = page.locator("table tbody tr", has_text=unique_plate)
+    history_row = page.locator(SESSION_ROW, has_text=unique_plate)
     expect(history_row).to_be_visible()
 
     # Fee is the 5th column (index 4, zero-based).

@@ -8,22 +8,15 @@ Why this scenario was chosen for automation:
   without anyone noticing.
 """
 
-import pytest
 from playwright.sync_api import Page, expect
+from conftest import start_parking, end_parking_session, ALERT_WARNING
 
 
 def test_duplicate_plate_blocked(logged_in_page: Page, unique_plate: str, base_url: str):
     page = logged_in_page
 
     # Step 1 - Start first parking session
-    page.goto(f"{base_url}/")
-    page.fill("#car_plate", unique_plate)
-    page.fill("#slot", "T2")
-    page.locator("input#submit").click()
-
-    expect(page.locator(".alert-success")).to_contain_text(
-        f"Parking started for {unique_plate}"
-    )
+    start_parking(page, base_url, unique_plate, "T2")
 
     # Step 2 - Attempt a second session with the same plate on a different slot
     page.goto(f"{base_url}/")
@@ -32,11 +25,7 @@ def test_duplicate_plate_blocked(logged_in_page: Page, unique_plate: str, base_u
     page.locator("input#submit").click()
 
     # Step 3 - Verify the duplicate is blocked with a warning
-    expect(page.locator(".alert-warning")).to_contain_text(
-        "Duplicate parking prevented"
-    )
+    expect(page.locator(ALERT_WARNING)).to_contain_text("Duplicate parking prevented")
 
     # Step 4 - Cleanup: end the original session to leave the app in clean state
-    page.goto(f"{base_url}/")
-    row = page.locator("table tbody tr", has_text=unique_plate)
-    row.locator("button.btn-danger").click()
+    end_parking_session(page, base_url, unique_plate)
