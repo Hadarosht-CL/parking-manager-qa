@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Pytest
+.pytest_cache/
+
+# Test run artifacts
+reports/
+
+# Claude Code
+.claude/
+
+# macOS
+.DS_Store
