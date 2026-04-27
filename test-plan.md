@@ -4,9 +4,9 @@
 
 ### What I chose to test and why
 
-My starting point was source-code inspection (`app.py`, `models.py`, `forms.py`) combined with live HTTP exploration of the running container. That gave me a complete, authoritative map of the system before writing a single test case.
+The starting point was source-code inspection (`app.py`, `models.py`, `forms.py`) combined with live HTTP exploration of the running container. That gave a complete, authoritative map of the system before writing a single test case.
 
-I prioritized testing along three axes:
+Testing was prioritized along three axes:
 
 | Axis | Reasoning |
 |---|---|
@@ -14,35 +14,28 @@ I prioritized testing along three axes:
 | **User-facing flows** | Login, start parking, end parking - these are the paths every real user walks. They must work reliably. |
 | **Boundary & validation** | The app enforces license plate rules both in JS (client) and Python (server). Divergence between layers is a common bug source. |
 
-I explicitly de-prioritized visual/cosmetic testing and load testing - the scope is correctness and reliability of functional behavior.
+Visual/cosmetic testing and load testing were explicitly de-prioritized - the scope is correctness and reliability of functional behavior.
 
 ---
 
 ### How I structured the testing approach
 
 ```
-Authentication
+Authentication (HIGH RISK)
 - login / logout correctness
-
-Core Parking Flow (happy path)
-- start session -> end session -> fee appears in history
-
-Data Integrity
-- duplicate car plate prevention
-- duplicate slot prevention
-- slot lock expiry edge case
-
-Input Validation
-- license plate: format, length, edge cases
-- server-side vs client-side divergence
-
-User Management
-- add user, delete user, delete user with sessions
-
-System & Integration
-- billing service call on end-parking
-- vehicle-types CRUD
 - unauthenticated access to protected routes
+
+Parking Lifecycle (CRITICAL BUSINESS FLOW)
+- start session -> end session -> fee appears in history
+- fee calculation correctness
+
+Edge Cases
+- duplicate car plate and slot prevention
+- slot lock expiry beyond Redis TTL
+- license plate validation: format, length, boundary patterns
+- user management: add, delete with/without sessions
+- billing service integration on end-parking
+- vehicle-types CRUD
 ```
 
 ---
@@ -58,7 +51,7 @@ System & Integration
 - Login -> start parking -> end parking -> verify fee in history (the complete lifecycle every user takes)
 - Admin manages users (add, delete with/without sessions)
 
-**Edge cases I specifically looked for:**
+**Edge cases specifically looked for:**
 - What happens when a session runs longer than the Redis TTL (1 hour)? The slot lock silently expires.
 - What happens when external services (billing, slot service) are unreachable? The app swallows errors silently.
 - Does the DB enforce the same rules as the form validation? (It does not - historical data confirms this.)
@@ -72,7 +65,7 @@ System & Integration
 
 ---
 
-### Authentication
+### Authentication (HIGH RISK)
 
 **TC-01 - Valid login redirects to dashboard**
 - Pre: app running, credentials `admin / password`
@@ -98,7 +91,7 @@ System & Integration
 
 ---
 
-### Core Parking Flow
+### Parking Lifecycle (CRITICAL BUSINESS FLOW)
 
 **TC-04 - Start parking - happy path**
 - Pre: logged in, no active session for the plate
@@ -124,7 +117,7 @@ System & Integration
 
 ---
 
-### Data Integrity
+### Edge Cases
 
 **TC-07 - Duplicate car plate is blocked**
 - Pre: plate `20304050` already has an active session
@@ -150,8 +143,6 @@ System & Integration
 - Priority: **High**
 
 ---
-
-### Input Validation
 
 **TC-10 - License plate shorter than 8 digits is rejected**
 - Pre: logged in
@@ -186,8 +177,6 @@ System & Integration
 
 ---
 
-### User Management
-
 **TC-14 - Add new user**
 - Pre: logged in as admin
 - Steps: navigate to `/users/add`, submit username `testuser`, password `testpass`
@@ -211,8 +200,6 @@ System & Integration
 - Priority: **Medium**
 
 ---
-
-### System & Integration
 
 **TC-17 - Vehicle-types page loads without error**
 - Pre: logged in
@@ -256,98 +243,87 @@ System & Integration
 
 ### BUG-01 - `/vehicle-types` route is completely broken (500 error)
 
-**Severity: Critical**
-
-**Impact:** Any attempt to manage vehicle types (add new types, adjust rates) crashes with a 500. The feature is fully inaccessible, meaning pricing cannot be updated through the UI. Confirmed live.
-
-**Root cause (two compounding issues):**
-1. `VehicleTypeForm` in `forms.py` is missing the `rate_per_hour` field - `app.py` calls `form.rate_per_hour.data` on submit, which would raise `AttributeError`
-2. The template `vehicle_types.html` does not exist in `/app/templates/`, so even the GET request crashes with `TemplateNotFound`
-
 **Steps to reproduce:**
 1. Log in as admin
 2. Navigate to `http://localhost:5000/vehicle-types`
 3. Observe HTTP 500
 
 **Expected:** Page renders with existing vehicle types and an add form
+
 **Actual:** `jinja2.exceptions.TemplateNotFound: vehicle_types.html`
+
+**Impact:** Pricing management is completely inaccessible. Vehicle type rates cannot be added or updated through the UI. Any business change to pricing requires a code-level fix, not an admin action. Two compounding issues cause this: `vehicle_types.html` template does not exist, and `VehicleTypeForm` is missing the `rate_per_hour` field that `app.py` expects on submit.
+
+**Severity: Critical**
 
 ---
 
 ### BUG-02 - Slot double-booking possible after Redis TTL expires
 
-**Severity: High**
-
-**Impact:** A parking slot can be booked by a second car while the original car is still actively parked, if the session exceeds 1 hour. This leads to two active sessions for the same physical slot - a direct operational failure.
-
-**Root cause:** Redis slot lock uses `expire(slot_key, 3600)` (1 hour TTL). There is no DB-level uniqueness check on `slot` for active sessions (`end_time IS NULL`). Once the Redis key expires, the guard is gone.
-
 **Steps to reproduce:**
 1. Start parking for car `A` in slot `42`
-2. Wait for Redis key `slot:42` to expire (or delete it manually: `docker exec parking-manager redis-cli del slot:42`)
+2. Delete the Redis key manually: `docker exec parking-manager redis-cli del slot:42` (simulates TTL expiry after 1 hour)
 3. Start parking for car `B` in slot `42`
-4. Both sessions now show as active for the same slot
+4. Observe both sessions active for the same slot
 
-**Expected:** Second booking rejected at all times while slot is occupied
-**Actual:** Second booking succeeds after Redis TTL
+**Expected:** Second booking rejected at all times while the slot is occupied
+
+**Actual:** Second booking succeeds once the Redis key expires
+
+**Impact:** Two cars can be assigned the same physical slot simultaneously. This produces conflicting active sessions, broken billing records, and an operational state that cannot be resolved without direct DB intervention. The failure is silent - the dashboard shows both sessions as valid with no warning. Any session exceeding 1 hour is vulnerable.
+
+**Severity: High**
 
 ---
 
 ### BUG-03 - Billing service never runs; all charges silently fail
 
-**Severity: High**
-
-**Impact:** Every "End Parking" action results in billing status `"error"`. No charges are ever processed. The feature appears to work (flash message is shown) but no billing occurs. This is a silent data-integrity failure with financial consequence.
-
-**Root cause:** `app.py` calls `http://localhost:5002/charge` on end-parking. `billing_service.py` is a separate Flask process that is not started inside the container. The `except` block swallows the `ConnectionRefusedError` and defaults to `"error"`.
-
 **Steps to reproduce:**
 1. Start and end any parking session
-2. Observe flash: "Fee: X.XX (billing: error)"
-3. `docker exec parking-manager curl http://localhost:5002/charge` -> connection refused
+2. Observe the flash message shows billing status `"error"`
+3. Confirm: `docker exec parking-manager curl http://localhost:5002/charge` -> connection refused
 
 **Expected:** Billing service processes the charge and returns `"paid"`
-**Actual:** Always returns `"error"`; charge is never recorded
+
+**Actual:** Every end-parking action silently fails billing; status is always `"error"` and no charge is recorded
+
+**Impact:** No parking session has ever been billed since deployment. The `billing_service.py` is a separate Flask process that is never started inside the container. The `except` block in `app.py` swallows the `ConnectionRefusedError` without alerting the user or logging a visible error, making this invisible in normal use. The financial loss scales directly with the number of sessions.
+
+**Severity: High**
 
 ---
 
 ### BUG-04 - Uploaded images served without authentication
 
-**Severity: High**
-
-**Impact:** Any uploaded car image is publicly accessible by URL without logging in. An attacker who knows or guesses filenames can access vehicle image data - a privacy and compliance risk.
-
-**Root cause:** `@app.route('/uploads/<filename>')` in `app.py` is missing `@login_required`.
-
 **Steps to reproduce:**
-1. Start a parking session with an uploaded image
-2. Log out
-3. Navigate to `http://localhost:5000/uploads/<filename>`
-4. Image is served with HTTP 200
+1. Start a parking session and upload an image
+2. Log out of the application
+3. Navigate directly to `http://localhost:5000/uploads/<filename>`
+4. Observe the image is served with HTTP 200
 
-**Expected:** Redirect to `/login`
-**Actual:** File served to unauthenticated user
+**Expected:** Request redirects to `/login`
+
+**Actual:** Image file is served to any unauthenticated user who knows or guesses the filename
+
+**Impact:** Vehicle images are personally identifiable data. Exposing them without authentication violates user privacy and may breach data protection regulations. Filenames are generated from the original upload name via `secure_filename()`, making them guessable for common naming patterns. The fix is a single missing `@login_required` decorator.
+
+**Severity: High**
 
 ---
 
 ### BUG-05 - Input validation inconsistency: invalid plates exist in DB, valid plates get rejected
 
-**Severity: Medium**
-
-**Impact (two-sided):**
-- **Over-blocking:** Plates like `12345678` are rejected by `validate_israeli_license_plate` as "test patterns" even though they could be legitimate plates. Users with real vehicles are blocked.
-- **Under-enforcing:** The history table contains plates such as `dvdsvd`, `21341243252465234645`, `88`, `123` - all violating current validation rules. This confirms validation was either added retroactively or can be bypassed, and the DB has no constraints to enforce the rules at the data layer.
-
-**Root cause:**
-- `forms.py` applies validation only at form submission (client-side + server-side). No DB-level column constraint enforces plate format.
-- The "test pattern" blocklist (`12345678`, `87654321`, sequential numbers) is overly aggressive.
-
 **Steps to reproduce (over-blocking):**
 1. Log in, submit plate `12345678`
-2. Observe: "This appears to be a test license plate"
+2. Observe: "This appears to be a test license plate" - submission rejected
 
-**Expected:** Plate accepted (it's a valid 8-digit number)
-**Actual:** Rejected
+**Expected:** Plate `12345678` accepted as a valid 8-digit number
+
+**Actual:** Rejected by the `validate_israeli_license_plate` blocklist
+
+**Impact:** Two-sided failure. Users with legitimate plates matching the blocklist patterns (`12345678`, sequential numbers) are permanently blocked from using the system with no clear remedy. At the same time, the history table contains plates like `dvdsvd`, `21341243252465234645`, and `88` - all violating current rules - proving the DB has no constraints to back up the form validation. The validation layer is both too strict for legitimate users and too weak to guarantee data integrity.
+
+**Severity: Medium**
 
 ---
 
